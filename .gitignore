@@ -13,8 +13,4 @@ work
 .settings
 .classpath
 .project
-<<<<<<< fix-130
 .gstack
-=======
-.gstack
->>>>>>> main

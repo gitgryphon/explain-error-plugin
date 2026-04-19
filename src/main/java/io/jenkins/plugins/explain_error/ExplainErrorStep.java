@@ -3,7 +3,14 @@ package io.jenkins.plugins.explain_error;
 import hudson.Extension;
 import hudson.model.Run;
 import hudson.model.TaskListener;
+import io.jenkins.plugins.explain_error.autofix.AutoFixOrchestrator;
+import io.jenkins.plugins.explain_error.autofix.AutoFixResult;
+import io.jenkins.plugins.explain_error.autofix.AutoFixStatus;
+import io.jenkins.plugins.explain_error.provider.BaseAIProvider;
+import java.util.Arrays;
+import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
 import jenkins.model.Jenkins;
 import org.jenkinsci.plugins.workflow.steps.Step;
 import org.jenkinsci.plugins.workflow.steps.StepContext;
@@ -24,6 +31,19 @@ public class ExplainErrorStep extends Step {
     private String customContext;
     private boolean collectDownstreamLogs;
     private String downstreamJobPattern;
+
+    // Auto-fix fields
+    private boolean autoFix = false;
+    private String autoFixCredentialsId = "";
+    private String autoFixRemoteUrl = "";
+    private String autoFixScmType = "";
+    private String autoFixGithubEnterpriseUrl = "";
+    private String autoFixGitlabUrl = "";
+    private String autoFixBitbucketUrl = "";
+    private String autoFixAllowedPaths = "pom.xml,build.gradle,build.gradle.kts,*.properties,*.yml,*.yaml,Jenkinsfile,Dockerfile,package.json,requirements.txt,go.mod";
+    private boolean autoFixDraftPr = false;
+    private int autoFixTimeoutSeconds = 120;
+    private String autoFixPrTemplate = "";
 
     @DataBoundConstructor
     public ExplainErrorStep() {
@@ -89,6 +109,106 @@ public class ExplainErrorStep extends Step {
         this.downstreamJobPattern = downstreamJobPattern != null ? downstreamJobPattern : "";
     }
 
+    public boolean isAutoFix() {
+        return autoFix;
+    }
+
+    @DataBoundSetter
+    public void setAutoFix(boolean autoFix) {
+        this.autoFix = autoFix;
+    }
+
+    public String getAutoFixCredentialsId() {
+        return autoFixCredentialsId;
+    }
+
+    @DataBoundSetter
+    public void setAutoFixCredentialsId(String autoFixCredentialsId) {
+        this.autoFixCredentialsId = autoFixCredentialsId != null ? autoFixCredentialsId : "";
+    }
+
+    public String getAutoFixRemoteUrl() {
+        return autoFixRemoteUrl;
+    }
+
+    @DataBoundSetter
+    public void setAutoFixRemoteUrl(String autoFixRemoteUrl) {
+        this.autoFixRemoteUrl = autoFixRemoteUrl != null ? autoFixRemoteUrl : "";
+    }
+
+    public String getAutoFixScmType() {
+        return autoFixScmType;
+    }
+
+    @DataBoundSetter
+    public void setAutoFixScmType(String autoFixScmType) {
+        this.autoFixScmType = autoFixScmType != null ? autoFixScmType : "";
+    }
+
+    public String getAutoFixGithubEnterpriseUrl() {
+        return autoFixGithubEnterpriseUrl;
+    }
+
+    @DataBoundSetter
+    public void setAutoFixGithubEnterpriseUrl(String autoFixGithubEnterpriseUrl) {
+        this.autoFixGithubEnterpriseUrl = autoFixGithubEnterpriseUrl != null ? autoFixGithubEnterpriseUrl : "";
+    }
+
+    public String getAutoFixGitlabUrl() {
+        return autoFixGitlabUrl;
+    }
+
+    @DataBoundSetter
+    public void setAutoFixGitlabUrl(String autoFixGitlabUrl) {
+        this.autoFixGitlabUrl = autoFixGitlabUrl != null ? autoFixGitlabUrl : "";
+    }
+
+    public String getAutoFixBitbucketUrl() {
+        return autoFixBitbucketUrl;
+    }
+
+    @DataBoundSetter
+    public void setAutoFixBitbucketUrl(String autoFixBitbucketUrl) {
+        this.autoFixBitbucketUrl = autoFixBitbucketUrl != null ? autoFixBitbucketUrl : "";
+    }
+
+    public String getAutoFixAllowedPaths() {
+        return autoFixAllowedPaths;
+    }
+
+    @DataBoundSetter
+    public void setAutoFixAllowedPaths(String autoFixAllowedPaths) {
+        this.autoFixAllowedPaths = autoFixAllowedPaths != null ? autoFixAllowedPaths
+                : "pom.xml,build.gradle,build.gradle.kts,*.properties,*.yml,*.yaml,Jenkinsfile,Dockerfile,package.json,requirements.txt,go.mod";
+    }
+
+    public boolean isAutoFixDraftPr() {
+        return autoFixDraftPr;
+    }
+
+    @DataBoundSetter
+    public void setAutoFixDraftPr(boolean autoFixDraftPr) {
+        this.autoFixDraftPr = autoFixDraftPr;
+    }
+
+    public int getAutoFixTimeoutSeconds() {
+        return autoFixTimeoutSeconds;
+    }
+
+    @DataBoundSetter
+    public void setAutoFixTimeoutSeconds(int autoFixTimeoutSeconds) {
+        this.autoFixTimeoutSeconds = autoFixTimeoutSeconds > 0 ? autoFixTimeoutSeconds : 60;
+    }
+
+    public String getAutoFixPrTemplate() {
+        return autoFixPrTemplate;
+    }
+
+    @DataBoundSetter
+    public void setAutoFixPrTemplate(String autoFixPrTemplate) {
+        this.autoFixPrTemplate = autoFixPrTemplate != null ? autoFixPrTemplate : "";
+    }
+
     @Override
     public StepExecution start(StepContext context) throws Exception {
         return new ExplainErrorStepExecution(context, this);
@@ -132,6 +252,46 @@ public class ExplainErrorStep extends Step {
             String explanation = explainer.explainError(run, listener, step.getLogPattern(), step.getMaxLines(),
                     step.getLanguage(), step.getCustomContext(), step.isCollectDownstreamLogs(),
                     step.getDownstreamJobPattern(), Jenkins.getAuthentication2());
+
+            if (step.isAutoFix()) {
+                String errorLogs = explainer.getLastErrorLogs();
+                BaseAIProvider provider = explainer.getResolvedProvider(run);
+
+                if (errorLogs == null) {
+                    listener.getLogger().println("[AutoFix] Skipped: no error logs available (explanation may have been disabled or skipped).");
+                    return explanation;
+                }
+                if (provider == null) {
+                    listener.getLogger().println("[AutoFix] Skipped: no AI provider configured.");
+                    return explanation;
+                }
+
+                AutoFixOrchestrator orchestrator = new AutoFixOrchestrator();
+                List<String> allowedPaths = Arrays.stream(step.getAutoFixAllowedPaths().split(","))
+                        .map(String::trim)
+                        .filter(s -> !s.isEmpty())
+                        .collect(Collectors.toList());
+
+                AutoFixResult fixResult = orchestrator.attemptAutoFix(
+                        run,
+                        errorLogs,
+                        provider,
+                        step.getAutoFixCredentialsId(),
+                        step.getAutoFixRemoteUrl().isEmpty() ? null : step.getAutoFixRemoteUrl(),
+                        step.getAutoFixScmType().isEmpty() ? null : step.getAutoFixScmType(),
+                        step.getAutoFixGithubEnterpriseUrl().isEmpty() ? null : step.getAutoFixGithubEnterpriseUrl(),
+                        step.getAutoFixGitlabUrl().isEmpty() ? null : step.getAutoFixGitlabUrl(),
+                        step.getAutoFixBitbucketUrl().isEmpty() ? null : step.getAutoFixBitbucketUrl(),
+                        allowedPaths,
+                        step.isAutoFixDraftPr(),
+                        step.getAutoFixTimeoutSeconds(),
+                        listener,
+                        step.getAutoFixPrTemplate().isEmpty() ? null : step.getAutoFixPrTemplate());
+                listener.getLogger().println("[AutoFix] Status: " + fixResult.getStatus() + " - " + fixResult.getMessage());
+                if (fixResult.getStatus() == AutoFixStatus.CREATED) {
+                    listener.getLogger().println("[AutoFix] PR created: " + fixResult.getPrUrl());
+                }
+            }
 
             return explanation;
         }

@@ -28,6 +28,7 @@ public class ErrorExplainer {
 
     private String providerName;
     private String urlString;
+    private String lastErrorLogs;
     private final UsageRecorder usageRecorder;
 
     private static final Logger LOGGER = Logger.getLogger(ErrorExplainer.class.getName());
@@ -42,6 +43,26 @@ public class ErrorExplainer {
 
     public String getProviderName() {
         return providerName;
+    }
+
+    /**
+     * Returns the error logs extracted during the last call to {@link #explainError}.
+     * Returns {@code null} if {@code explainError} has not been called yet.
+     */
+    public String getLastErrorLogs() {
+        return lastErrorLogs;
+    }
+
+    /**
+     * Returns the resolved AI provider for the given run (folder-level first, then global).
+     * Delegates to the private {@link #resolveProvider(Run)} method.
+     *
+     * @param run the build run to resolve the provider for
+     * @return the resolved AI provider, or {@code null} if none is configured
+     */
+    @CheckForNull
+    public BaseAIProvider getResolvedProvider(@CheckForNull Run<?, ?> run) {
+        return resolveProvider(run).provider();
     }
 
     public String explainError(Run<?, ?> run, TaskListener listener, String logPattern, int maxLines) {
@@ -121,6 +142,7 @@ public class ErrorExplainer {
             PipelineLogExtractor.ExtractionResult extractionResult = extractErrorLogs(run, maxLines,
                     collectDownstreamLogs, downstreamJobPattern, authentication);
             String errorLogs = filterErrorLogs(extractionResult.logLines(), logPattern);
+            this.lastErrorLogs = errorLogs;
             inputLogLineCount = countLines(errorLogs);
             logExtractionSummary(listener, extractionResult, maxLines);
 
